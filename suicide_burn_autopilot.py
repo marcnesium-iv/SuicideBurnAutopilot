@@ -12,13 +12,12 @@
 #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-
+from __future__ import division
 import krpc
 import time
 import numpy as np
-from __future__ import division
 from scipy.integrate import solve_ivp
-from scipy.optimize import brentq, minimize
+from scipy.optimize import brentq, ridder
 
 
 # ---
@@ -26,18 +25,24 @@ from scipy.optimize import brentq, minimize
 # ---
 
 g = 9.81335163116455    # standard gravity in KSP
-MAX_STEP_IVP = 0.25     # max step size of solve_ivp in seconds
-FATOL = 0.5             # errors acceptable for the convergence of minimize
-XATOL = 0.05
+MAX_STEP_IVP = 0.2      # max step size of solve_ivp in seconds
 RPC_PORT = 50002        # ports used for the KRPC connection
 STREAM_PORT = 50003     # default: RPC_PORT = 50000, STREAM_PORT = 50001
 CONSOLE_OUTPUT = True   # enables text output
-FINAL_ALTITUDE = 10     # altitude offset from surface in m
+FINAL_ALTITUDE = 20     # altitude offset from surface in m
 
 
 # ---
 # functions
 # ---
+
+def vis_viva(r, mu, a):
+    '''
+    Returns the orbital velocity as a function of the radius r, the gravitational
+    parameter mu, and the semi major axis of the orbit a.
+    '''
+    return np.sqrt(mu*(2/r - 1/a))
+
 
 def delta_h(t, orbit, body, refframe):
     '''
@@ -52,7 +57,7 @@ def delta_h(t, orbit, body, refframe):
     return dh
 
 
-def EOM_3d(t, w, c, t_burn, refframes, sc):
+def EOM(t, w, c, t_burn, refframes, sc):
     '''
     Defines the 3d equations of motion of a rocket in a gravitational field
     burning retrograde in the rotating frame of the body.
@@ -73,72 +78,61 @@ def EOM_3d(t, w, c, t_burn, refframes, sc):
     # distance between vessel and center of body
     d = np.linalg.norm(w[0:3])
     
-    # first order equations of motion
-    if t < t_burn:      # coast until t_burn
-        f = [w[3],
-             w[4],
-             w[5],
-             -c[0]*w[0]/d**3,
-             -c[0]*w[1]/d**3,
-             -c[0]*w[2]/d**3]
-    else:               # actual hoverslam maneuver
-        m = c[2]-c[3]*(t-t_burn)
-        f = [w[3],
-             w[4],
-             w[5],
-             -c[1]*rg[0]/m - c[0]*w[0]/d**3,
-             -c[1]*rg[1]/m - c[0]*w[1]/d**3,
-             -c[1]*rg[2]/m - c[0]*w[2]/d**3]
+    m = c[2]-c[3]*(t-t_burn)
+    f = [w[3],
+         w[4],
+         w[5],
+         -c[1]*rg[0]/m - c[0]*w[0]/d**3,
+         -c[1]*rg[1]/m - c[0]*w[1]/d**3,
+         -c[1]*rg[2]/m - c[0]*w[2]/d**3]
     return f
 
 
-def cost_function(t_burn, w, constants, t_span, refframes, sc, body):
+def cost_function(t_burn, w, constants, t0, refframes, sc, body, orbit):
     '''
-    Calculates the final hight and velocity after hoverslam maneuver.
+    Calculates the final hight after hoverslam maneuver.
     '''
     mu, F, m0, dm = constants
     refframe_fixed, refframe_rotating = refframes   # body reference frames
     
-    # The solver evaluates EOM() within the time interval t_span. If the velocity
-    # drops to zero (calculated by finish_burn) or the vessel hits the surface
-    # (guess which function...), the solver stops the evaluation.
-    s = solve_ivp(lambda t, w: EOM_3d(t, w, constants, t_burn, refframes, sc),
-                  t_span, w, max_step=MAX_STEP_IVP, events=(finish_burn, hit_surface),
-                  dense_output=True, method='LSODA')
+    # position at t_burn
+    pos_burn = orbit.position_at(t_burn+t0, refframe_fixed)
+    
+    # speed at t_burn
+    speed_burn = vis_viva(orbit.radius_at(t_burn+t0), mu, orbit.semi_major_axis)
+    
+    # direction at t_burn
+    dir_burn = np.array(orbit.position_at(t_burn+t0+0.5, refframe_fixed)) - np.array(orbit.position_at(t_burn+t0-0.5, refframe_fixed))
+    dir_burn /= np.linalg.norm(dir_burn)  # normalize
+    vel_burn = tuple(speed_burn*dir_burn) # velocity vector at t_burn
 
-    # only one of both events can happen
-    for i in xrange(len(s.t_events)):
-        if len(s.t_events[i]) > 0:
-            # t_event is the time of the end of the maneuver
-            t_event = s.t_events[i][0]
-            break
+    w_burn = pos_burn + vel_burn
+    
+    t_span = (t_burn, orbit.time_to_periapsis)
+    
+    # The solver evaluates EOM() within the time interval t_span. If the velocity
+    # drops to zero (calculated by finish_burn) the solver stops the evaluation.
+    s = solve_ivp(lambda t, w: EOM(t, w, constants, t_burn, refframes, sc),
+                  t_span, w_burn, max_step=MAX_STEP_IVP, events=finish_burn,
+                  dense_output=True, method='LSODA')
+    
+    t_event = s.t_events[0][0]
     
     # position and velocity at impact or zero velocity
     f = s.sol(t_event)
     
-    # convert velocity to rotating frame
-    pos = f[0:3]
-    vr = sc.transform_velocity(pos, f[3:6], refframe_fixed, refframe_rotating)
-    
     # current altitude above terrain at t_event
-    lat = body.latitude_at_position(pos, refframe_fixed)        # latitude
-    lon = body.longitude_at_position(pos, refframe_fixed)       # longitude
+    lat = body.latitude_at_position(f[0:3], refframe_fixed)        # latitude
+    lon = body.longitude_at_position(f[0:3], refframe_fixed)       # longitude
     body_rotation = t_event*body.rotational_speed*180./np.pi
     lon -= body_rotation    # compensate body rotation
     if lon < -180.:
         lon += 360.
-    current_alt = body.altitude_at_position(pos, refframe_fixed) - body.surface_height(lat, lon)
-    
-    # figure of merit: final height + final velocity relative to the surface
-    FOM = 0.2*current_alt + np.linalg.norm(vr)
-    
-    # worse t_burn should give worse FOM (makes the minimization problem convex)
-    if t_event < t_burn:
-        FOM += 30*(t_burn-t_event)
-    
+    current_alt = body.altitude_at_position(f[0:3], refframe_fixed) - body.surface_height(lat, lon)
+
     if CONSOLE_OUTPUT:
-        print '%4.2f \t %.1f \t %.1f \t\t %.1f' % (t_burn[0], FOM, np.linalg.norm(vr), current_alt)
-    return FOM
+        print '%4.3f\t\t%.2f' % (t_burn, current_alt)
+    return current_alt - FINAL_ALTITUDE
 
 
 # -------
@@ -211,6 +205,7 @@ while True:
             m0 = vessel.mass
             F = vessel.max_vacuum_thrust
             dm = F/(vessel.vacuum_specific_impulse*g)    # fuel consumption (kg/s)
+            R = body.equatorial_radius
             
             # data streams (positions, velocities and time)
             pos = conn.add_stream(vessel.position, body_fixed_frame)
@@ -260,22 +255,6 @@ while True:
             finish_burn.terminal = True
             finish_burn.direction = -1
             
-            def hit_surface(t, y):
-                '''
-                Calculates the current altitude. Terminates the solver when
-                reaching FINAL_ALTITUDE m.
-                '''
-                lat = body.latitude_at_position(y[0:3], body_fixed_frame)
-                lon = body.longitude_at_position(y[0:3], body_fixed_frame)
-                body_rotation = t*body.rotational_speed*180./np.pi
-                lon -= body_rotation
-                if lon < -180.:
-                    lon += 360.
-                surface_h = body.surface_height(lat, lon)
-                return body.altitude_at_position(y[0:3], body_fixed_frame) - surface_h - FINAL_ALTITUDE
-            hit_surface.terminal = True
-            hit_surface.direction = -1
-            
             
             # ---
             # the actual minimization process
@@ -283,7 +262,7 @@ while True:
             
             if CONSOLE_OUTPUT:
                 print '\nminimizing cost function\n'
-                print 't_burn \t FOM \t final speed \t final altitude'
+                print 't_burn \t\t altitude'
             
             # w0: initial state of the vessel
             w0 = pos0 + vel0
@@ -292,31 +271,40 @@ while True:
             c = (mu, F, m0, dm)
             
             # t_span: time interval in which the EOM is evaluated
-            t_span = (0.0, orbit.time_to_periapsis)
+            #t_span_end = orbit.ut_at_true_anomaly(-orbit.true_anomaly_at_radius(R))-t0
+            t_span_end = t_impact-t0-2.0
+            t_span = (0.0, t_span_end)
             
             refframes = (body_fixed_frame, body_rotating_frame)
             tt = time.time()    # measure the time of the optimization
             
-            # minimize cost_function (and therefore the figure of merit "speed + altitude")
-            # by varying t_burn
-            res = minimize(cost_function, t_burn_guess-t0,
-                           args=(w0, c, t_span, refframes, sc, body),
-                           method='Nelder-Mead',
-                           options={'fatol': FATOL, 'xatol': XATOL})
-
-            # result of the minimization
-            t_burn = res.x + t0
-            if type(t_burn) == np.ndarray:
-                t_burn = float(t_burn)
+            # find the root of cost_function and therefore the t_burn where
+            # the final altitude is FINAL_ALTITUDE
+            t_burn = ridder(cost_function, 0.0, t_span_end,
+                                 args=(w0, c, t0, refframes, sc, body, orbit),
+                                 xtol=1e-6, rtol=1e-7)
             
-            # solve EOM again using the optimized t_burn
-            s = solve_ivp(lambda t, w: EOM_3d(t, w, c, t_burn-t0, refframes, sc),
-                          t_span, w0, max_step=MAX_STEP_IVP, events=(finish_burn, hit_surface),
+            # ---
+            # evaluate the EOM again at t_burn
+            # ---
+            
+            # position at t_burn
+            pos_burn = orbit.position_at(t_burn+t0, body_fixed_frame)
+            
+            # speed at t_burn
+            speed_burn = vis_viva(orbit.radius_at(t_burn+t0), mu, orbit.semi_major_axis)
+            
+            # direction at t_burn
+            dir_burn = np.array(orbit.position_at(t_burn+t0+0.5, body_fixed_frame)) - np.array(orbit.position_at(t_burn+t0-0.5, body_fixed_frame))
+            dir_burn /= np.linalg.norm(dir_burn)  # normalize
+            vel_burn = tuple(speed_burn*dir_burn) # velocity vector at t_burn
+        
+            w_burn = pos_burn + vel_burn
+            t_span = (t_burn, orbit.time_to_periapsis)
+            s = solve_ivp(lambda t, w: EOM(t, w, c, t_burn, refframes, sc),
+                          t_span, w_burn, max_step=MAX_STEP_IVP, events=finish_burn,
                           dense_output=True, method='LSODA')
-            for i in xrange(len(s.t_events)):
-                if len(s.t_events[i]) > 0:
-                    t_touchdown = s.t_events[i][0]
-                    break
+            t_touchdown = s.t_events[0][0]
             
             # evaluate solution at end of burn (t_touchdown)
             final = s.sol(t_touchdown)  # pos and vel of vessel at end of maneuver
@@ -335,13 +323,13 @@ while True:
                                         body_fixed_frame, body_rotating_frame)
             
             # required delta_v, calculated using the rocket equation
-            delta_v = vessel.vacuum_specific_impulse*g*np.log(m0/(m0-dm*(t_touchdown-t_burn+t0)))
+            delta_v = vessel.vacuum_specific_impulse*g*np.log(m0/(m0-dm*(t_touchdown-t_burn)))
             
             if CONSOLE_OUTPUT:
                 print '\nOptimization finished'
                 print 'Elapsed time: %3.1f s' % (time.time()-tt)
                 print '\n\nResults of the optimization:'
-                print '\nt_burn = %4.2f s' % (t_burn-t0)
+                print '\nt_burn = %4.2f s' % (t_burn)
                 print 't_touchdown = %4.2f s' % t_touchdown
                 print '\nfinal altitude: %.1f m' % hf
                 print 'final velocities: vx=%2.1f m/s, vy=%2.1f m/s, vz=%2.1f m/s' % (vrf[0], vrf[1], vrf[2])
@@ -382,13 +370,13 @@ while True:
             # warp to t_burn-10s
             info_text.content = 'Warping to burn'
             info_text.color = (1.0, 1.0, 1.0)
-            sc.warp_to(t_burn - 10.0)
+            sc.warp_to(t_burn + t0 - 10.0)
             
             # point vessel retrograde during burn
             ap.sas_mode = ap.sas_mode.retrograde
             
             # wait until t_burn
-            while ut() < t_burn:
+            while ut() < t_burn + t0:
                 time.sleep(0.01)
             
             # light the candle!
