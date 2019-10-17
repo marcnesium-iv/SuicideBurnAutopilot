@@ -17,7 +17,7 @@ import krpc
 import time
 import numpy as np
 from scipy.integrate import solve_ivp
-from scipy.optimize import brentq, ridder
+from scipy.optimize import brentq
 
 
 # ---
@@ -25,9 +25,9 @@ from scipy.optimize import brentq, ridder
 # ---
 
 g = 9.81335163116455    # standard gravity in KSP
-MAX_STEP_IVP = 0.2      # max step size of solve_ivp in seconds
-RPC_PORT = 50002        # ports used for the KRPC connection
-STREAM_PORT = 50003     # default: RPC_PORT = 50000, STREAM_PORT = 50001
+MAX_STEP_IVP = 2.0      # max step size of solve_ivp in seconds
+RPC_PORT = 50000        # ports used for the KRPC connection
+STREAM_PORT = 50001
 CONSOLE_OUTPUT = True   # enables text output
 FINAL_ALTITUDE = 20     # altitude offset from surface in m
 
@@ -229,7 +229,7 @@ while True:
             t1 = t0 + orbit.time_to_periapsis
             t_impact = brentq(delta_h, args=(orbit, body, body_fixed_frame),
                               a=t0, b=t1)
-            
+
             # estimate time until burn
             # the factor 0.8 is empirical
             t_burn_guess = t_impact - 0.8*np.linalg.norm(vel_rotating())/(F/m0)
@@ -271,18 +271,17 @@ while True:
             c = (mu, F, m0, dm)
             
             # t_span: time interval in which the EOM is evaluated
-            #t_span_end = orbit.ut_at_true_anomaly(-orbit.true_anomaly_at_radius(R))-t0
             t_span_end = t_impact-t0-2.0
-            t_span = (0.0, t_span_end)
             
             refframes = (body_fixed_frame, body_rotating_frame)
             tt = time.time()    # measure the time of the optimization
             
             # find the root of cost_function and therefore the t_burn where
             # the final altitude is FINAL_ALTITUDE
-            t_burn = ridder(cost_function, 0.0, t_span_end,
-                                 args=(w0, c, t0, refframes, sc, body, orbit),
-                                 xtol=1e-6, rtol=1e-7)
+            t_burn = brentq(cost_function, 0.0, t_span_end,
+                            args=(w0, c, t0, refframes, sc, body, orbit),
+                            xtol=1e-3, rtol=1e-4)
+
             
             # ---
             # evaluate the EOM again at t_burn
@@ -354,14 +353,14 @@ while True:
             info_text.color = (1.0, 1.0, 1.0)
             
             # approximate direction of velocity at t_burn
-            pos1 = np.array(orbit.position_at(t_burn, body_rotating_frame))
-            pos2 = np.array(orbit.position_at(t_burn+1.0, body_rotating_frame))
+            pos1 = np.array(orbit.position_at(t0+t_burn, body_rotating_frame))
+            pos2 = np.array(orbit.position_at(t0+t_burn+2.0, body_rotating_frame))
             dpos = pos1 - pos2
             v_burn = dpos/np.linalg.norm(dpos)
             
             # rotate vessel to retrograde direction at t_burn
-            ap.target_direction = v_burn
             ap.engage()
+            ap.target_direction = v_burn
             ap.wait()
             ap.disengage()
             ap.sas = True
@@ -375,8 +374,8 @@ while True:
             # point vessel retrograde during burn
             ap.sas_mode = ap.sas_mode.retrograde
             
-            # wait until t_burn
-            while ut() < t_burn + t0:
+            # wait until t_burn, start half a physics tick early
+            while ut() < t_burn + t0 - 0.02:
                 time.sleep(0.01)
             
             # light the candle!
@@ -422,10 +421,8 @@ while True:
             if CONSOLE_OUTPUT:
                 print '\nlanding coordinates: (%3.4f, %3.4f)\n' % (lat, lon)
             
-            # wait until situation changes
-            while vessel.situation == sc.VesselSituation.landed:
-                time.sleep(1)
-            info_text.content = ''
+            conn.close()
+            exit()
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
