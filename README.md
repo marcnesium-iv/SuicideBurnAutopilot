@@ -46,11 +46,3 @@ After calculating t_burn the script uses the KRPC autopilot to point retrograde 
 In line 32 you can find the parameter FINAL_ALTITUDE which defines an offset above the surface in meters. The script will try to stop the rocket at that point and the MechJeb autopilot will then cover the last few meters. Increase FINAL_ALTITUDE for large rockets.
 
 You can also try to mess with the integrating function by changing MAX_STEP_IVP. Generally, smaller values should give more precise results but will also take longer. However, the default values give a good compromise of computation time and not crashing into a planet.
-
-
-## ~~Bugs~~ Features
-
-- The KRPC autopilot should point the rocket retrograde right after resuming the game (lines 375-377), but sometimes this is skipped. Does anybody know why?
-- Why is the UI gone after landing but the Python process is still running?
-
-If you find any new features or can help me to resolve some, please contact me. :)
