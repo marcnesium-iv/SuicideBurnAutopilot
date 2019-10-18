@@ -41,7 +41,6 @@ After calculating t_burn the script uses the KRPC autopilot to point retrograde 
 - A small UI should appear on the right side of the screen.
 - Deorbit your spacecraft, i.e. the periapsis has to be below the surface. Too shallow landing angles could lead to larger errors resulting in RUD events... but most of the time it still works pretty good.
 - Hit the button "Start autopilot"
-- The calculations will take about 30 to 60 seconds. You can pause the game in the meantime. Resume the game when the calculations are finished (indicated by the console output or the UI).
 - Pray! The autopilot will do the rest.
 
 In line 32 you can find the parameter FINAL_ALTITUDE which defines an offset above the surface in meters. The script will try to stop the rocket at that point and the MechJeb autopilot will then cover the last few meters. Increase FINAL_ALTITUDE for large rockets.
@@ -49,7 +48,7 @@ In line 32 you can find the parameter FINAL_ALTITUDE which defines an offset abo
 You can also try to mess with the integrating function by changing MAX_STEP_IVP. Generally, smaller values should give more precise results but will also take longer. However, the default values give a good compromise of computation time and not crashing into a planet.
 
 
-## ~~Bugs~~Features
+## ~~Bugs~~ Features
 
 - The KRPC autopilot should point the rocket retrograde right after resuming the game (lines 375-377), but sometimes this is skipped. Does anybody know why?
 - Why is the UI gone after landing but the Python process is still running?
